@@ -10,7 +10,7 @@ def scrape():
     all_product_data += scrape_page(base_url)
 
     # Determine the number of pages to scrape
-    num_pages = 3  
+    num_pages = 12 
     for page in range(2, num_pages + 1):
         page_url = f"{base_url}&page={page}"
         all_product_data += scrape_page(page_url)

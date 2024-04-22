@@ -19,5 +19,5 @@ def scrape():
 
     return jsonify(all_product_data)
 
-if __name__ == '__main__':
-    app.run(debug=True)
+# if __name__ == '__main__':
+#     app.run(debug=True)

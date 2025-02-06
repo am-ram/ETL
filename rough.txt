@@ -1,0 +1,417 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.svm import SVC
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.metrics import accuracy_score, mean_squared_error, r2_score, classification_report
+import plotly.express as px
+import plotly.graph_objs as go
+
+# Importing time series models
+from statsmodels.tsa.arima.model import ARIMA
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
+from tensorflow.keras.preprocessing.sequence import TimeseriesGenerator
+
+def single_prediction(model, X_scaler, y_scaler, feature_cols, input_data, problem_type, model_name=None):
+    """
+    Predict for a single input row
+    
+    Args:
+        model: Trained model
+        X_scaler: Feature scaler
+        y_scaler: Target scaler (for regression/time series)
+        feature_cols: List of feature column names
+        input_data: Dictionary of input values
+        problem_type: Type of machine learning problem
+        model_name: Specific model name for special handling
+    
+    Returns:
+        Predicted value
+    """
+    # Convert input to DataFrame
+    input_df = pd.DataFrame([input_data])
+    input_df = pd.get_dummies(input_df)  # Handle categorical variables
+    
+    # Align columns with training data
+    for col in feature_cols:
+        if col not in input_df.columns:
+            input_df[col] = 0
+    
+    # Reorder columns to match training data
+    input_df = input_df[feature_cols]
+    
+    # Scale input
+    input_scaled = X_scaler.transform(input_df)
+    
+    # Prediction based on model type
+    if model_name == 'LSTM':
+        # LSTM requires specific reshaping
+        input_lstm = input_scaled.reshape((1, 1, input_scaled.shape[1]))
+        prediction = model.predict(input_lstm)
+        return y_scaler.inverse_transform(prediction)[0][0]
+    
+    elif model_name == 'ARIMA':
+        # ARIMA requires time series specific prediction
+        model_fit = model.fit()
+        prediction = model_fit.forecast(steps=1)
+        return prediction[0]
+    
+    else:
+        # Standard scikit-learn models
+        prediction = model.predict(input_scaled)
+        
+        # Handle classification rounding
+        if problem_type == 'Classification':
+            return int(np.round(prediction[0]))
+        
+        return prediction[0]
+
+def create_lstm_model(X_train, units=50, dropout=0.2):
+    """Create and compile an LSTM model"""
+    model = Sequential([
+        LSTM(units=units, activation='relu', input_shape=(X_train.shape[1], X_train.shape[2])),
+        Dense(1)
+    ])
+    model.compile(optimizer='adam', loss='mse')
+    return model
+
+def prepare_lstm_data(data, look_back=1):
+    """Prepare data for LSTM"""
+    generator = TimeseriesGenerator(
+        data, data, 
+        length=look_back, 
+        batch_size=1
+    )
+    return generator
+
+def plot_results(y_test, predictions, problem_type):
+    """Plot actual vs predicted values"""
+    results_df = pd.DataFrame({
+        'Actual': y_test,
+        'Predicted': predictions
+    })
+    
+    if problem_type == 'Regression':
+        fig = px.scatter(results_df, x='Actual', y='Predicted', 
+                        title='Actual vs Predicted Values')
+        fig.add_shape(
+            type='line', line=dict(dash='dash'),
+            x0=y_test.min(), y0=y_test.min(),
+            x1=y_test.max(), y1=y_test.max()
+        )
+        st.plotly_chart(fig)
+        
+        # Add residuals plot
+        residuals = y_test - predictions
+        fig_residuals = px.scatter(x=predictions, y=residuals,
+                                 labels={'x': 'Predicted Values', 'y': 'Residuals'},
+                                 title='Residuals Plot')
+        fig_residuals.add_hline(y=0, line_dash="dash")
+        st.plotly_chart(fig_residuals)
+    else:
+        # For classification, create a confusion matrix
+        from sklearn.metrics import confusion_matrix
+        
+        cm = confusion_matrix(y_test, predictions)
+        fig = px.imshow(cm, 
+                       labels=dict(x="Predicted", y="Actual"),
+                       title='Confusion Matrix',
+                       color_continuous_scale='Blues')
+        st.plotly_chart(fig)
+        
+        # Add prediction distribution
+        fig_dist = px.histogram(results_df, x=['Actual', 'Predicted'], 
+                              barmode='group',
+                              title='Distribution of Actual vs Predicted Classes')
+        st.plotly_chart(fig_dist)
+
+def train_model(model, X_train, X_test, y_train, y_test, problem_type, model_name=None):
+    """Train model and return metrics"""
+    if model_name == 'ARIMA':
+        # ARIMA requires time series specific handling
+        model = ARIMA(y_train, order=(1,1,1))
+        model_fit = model.fit()
+        y_pred = model_fit.forecast(steps=len(y_test))
+    elif model_name == 'LSTM':
+        # LSTM requires reshaping and scaling
+        scaler = MinMaxScaler()
+        y_train_scaled = scaler.fit_transform(y_train.values.reshape(-1, 1))
+        y_test_scaled = scaler.transform(y_test.values.reshape(-1, 1))
+        
+        # Prepare LSTM data
+        look_back = 1
+        X_train_lstm = y_train_scaled[:-look_back].reshape((len(y_train_scaled)-look_back, 1, 1))
+        y_train_lstm = y_train_scaled[look_back:]
+        
+        model.fit(X_train_lstm, y_train_lstm, epochs=50, verbose=0)
+        
+        # Predict
+        X_test_lstm = y_test_scaled[:-look_back].reshape((len(y_test_scaled)-look_back, 1, 1))
+        y_pred_scaled = model.predict(X_test_lstm)
+        y_pred = scaler.inverse_transform(y_pred_scaled).flatten()
+    else:
+        # Standard scikit-learn model training
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+    
+    # Compute metrics based on problem type
+    if problem_type == 'Classification':
+        accuracy = accuracy_score(y_test, y_pred.round())
+        report = classification_report(y_test, y_pred.round())
+        return {
+            'accuracy': accuracy,
+            'report': report,
+            'predictions': y_pred.round(),
+            'y_test': y_test
+        }
+    else:
+        mse = mean_squared_error(y_test, y_pred)
+        r2 = r2_score(y_test, y_pred)
+        mae = np.mean(np.abs(y_test - y_pred))
+        return {
+            'mse': mse,
+            'r2': r2,
+            'mae': mae,
+            'predictions': y_pred
+        }
+
+def main():
+    st.title("Machine Learning Web App")
+    
+    with st.sidebar:
+        st.header("Model Configuration")
+        st.markdown("""
+        This app helps you:
+        - Train ML models on your data
+        - Evaluate model performance
+        - Visualize predictions
+        """)
+    
+    # Load data
+    data = st.file_uploader("Upload your dataset", type=["csv", "txt", "xls"])
+    
+    if data is not None:
+        df = pd.read_csv(data)
+        
+        # Display sample data in an expander
+        with st.expander("Preview Dataset"):
+            st.dataframe(df.head())
+            st.write("Dataset Shape:", df.shape)
+        
+        # Select problem type
+        problem_type = st.selectbox(
+            "Select Problem Type",
+            ["Classification", "Regression", "Time Series"],
+            index=None,
+            placeholder="Choose problem type"
+        )
+        
+        if problem_type:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                feature_cols = st.multiselect(
+                    "Select Feature Columns",
+                    df.columns,
+                    placeholder="Choose features for training"
+                )
+            
+            with col2:
+                target_col = st.selectbox(
+                    "Select Target Column",
+                    [col for col in df.columns if col not in feature_cols],
+                    index=None,
+                    placeholder="Choose target variable"
+                )
+            
+            if feature_cols and target_col:
+                # Model selection
+                models = {
+                    'Classification': {
+                        'Logistic Regression': LogisticRegression(),
+                        'KNN': KNeighborsClassifier(),
+                        'SVM': SVC(),
+                        'Random Forest': RandomForestClassifier()
+                    },
+                    'Regression': {
+                        'Linear Regression': LinearRegression(),
+                        'Random Forest': RandomForestRegressor(),
+                        'ARIMA': None,
+                        'LSTM': None
+                    },
+                    'Time Series': {
+                        'ARIMA': None,
+                        'LSTM': None
+                    }
+                }
+                
+                with st.sidebar:
+                    selected_model = st.selectbox(
+                        "Select Model",
+                        list(models[problem_type].keys()),
+                        index=None,
+                        placeholder="Choose a model"
+                    )
+                    
+                    if selected_model:
+                        st.write("---")
+                        st.write("Model Parameters")
+                        
+                        if selected_model == 'ARIMA':
+                            p = st.slider('p (AR order)', 0, 5, 1)
+                            d = st.slider('d (Differencing)', 0, 2, 1)
+                            q = st.slider('q (MA order)', 0, 5, 1)
+                            model_config = (p, d, q)
+                        
+                        elif selected_model == 'LSTM':
+                            units = st.slider('LSTM Units', 10, 200, 50)
+                            epochs = st.slider('Training Epochs', 10, 200, 50)
+                            model = create_lstm_model(None, units=units)
+                        
+                        elif selected_model == 'KNN':
+                            n_neighbors = st.slider('Number of neighbors', 1, 20, 5)
+                            model = KNeighborsClassifier(n_neighbors=n_neighbors)
+                        
+                        elif selected_model == 'Random Forest':
+                            n_estimators = st.slider('Number of trees', 10, 100, 50)
+                            max_depth = st.slider('Maximum depth', 1, 50, 10)
+                            model = (RandomForestClassifier if problem_type == 'Classification' 
+                                   else RandomForestRegressor)(n_estimators=n_estimators, max_depth=max_depth)
+                        else:
+                            model = models[problem_type][selected_model]
+                
+                if selected_model:
+                    if st.button('Train Model', type='primary'):
+                        with st.spinner('Training model...'):
+                            # Prepare data
+                            X = df[feature_cols]
+                            y = df[target_col]
+                            X = pd.get_dummies(X)  # Handle categorical variables
+                            
+                            # Scale features
+                            scaler = StandardScaler()
+                            X_scaled = scaler.fit_transform(X)
+                            
+                            # Split data
+                            if problem_type == 'Time Series':
+                                # Ensure data is sequential for time series
+                                X_train, X_test = X_scaled[:-len(X_scaled)//5], X_scaled[-len(X_scaled)//5:]
+                                y_train, y_test = y[:-len(y)//5], y[-len(y)//5:]
+                            else:
+                                X_train, X_test, y_train, y_test = train_test_split(
+                                    X_scaled, y, test_size=0.2, random_state=42
+                                )
+                            
+                            # Train and evaluate
+                            if selected_model == 'LSTM':
+                                # Reshape for LSTM
+                                model = create_lstm_model(
+                                    X_train.reshape((X_train.shape[0], 1, X_train.shape[1])), 
+                                    units=units
+                                )
+                                metrics = train_model(
+                                    model, X_train, X_test, y_train, y_test, 
+                                    problem_type, model_name='LSTM'
+                                )
+                            elif selected_model == 'ARIMA':
+                                # ARIMA requires time series data
+                                metrics = train_model(
+                                    None, X_train, X_test, y_train, y_test, 
+                                    problem_type, model_name='ARIMA'
+                                )
+                            else:
+                                metrics = train_model(
+                                    model, X_train, X_test, y_train, y_test, problem_type
+                                )
+                            
+                            st.success('Model training completed!')
+                            
+                            # Results section
+                            st.write("---")
+                            st.subheader("Model Performance")
+                            display_metrics(metrics, problem_type)
+                            
+                            # Visualizations
+                            st.write("---")
+                            st.subheader("Predictions Visualization")
+                            plot_results(y_test, metrics['predictions'], problem_type)
+                            
+                            # Feature importance for Random Forest
+                            if selected_model == 'Random Forest':
+                                st.write("---")
+                                st.subheader("Feature Importance")
+                                importance_df = pd.DataFrame({
+                                    'Feature': X.columns,
+                                    'Importance': model.feature_importances_
+                                }).sort_values('Importance', ascending=False)
+                                
+                                fig = px.bar(
+                                    importance_df,
+                                    x='Feature',
+                                    y='Importance',
+                                    title='Feature Importance Plot'
+                                )
+                                st.plotly_chart(fig)
+
+def display_metrics(metrics, problem_type):
+    """Display metrics using native Streamlit components"""
+    if problem_type == 'Classification':
+        # Create three columns for key metrics
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric(
+                label="Accuracy Score",
+                value=f"{metrics['accuracy']:.2%}"
+            )
+        
+        # Parse classification report for precision and recall
+        report_dict = classification_report(metrics['y_test'], metrics['predictions'], output_dict=True)
+        avg_precision = report_dict['weighted avg']['precision']
+        avg_recall = report_dict['weighted avg']['recall']
+        
+        with col2:
+            st.metric(
+                label="Precision (Weighted)",
+                value=f"{avg_precision:.2%}"
+            )
+        
+        with col3:
+            st.metric(
+                label="Recall (Weighted)",
+                value=f"{avg_recall:.2%}"
+            )
+        
+        # Detailed classification report in an expander
+        with st.expander("View Detailed Classification Report"):
+            st.text(metrics['report'])
+            
+    else:  # Regression or Time Series
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.metric(
+                label="R² Score",
+                value=f"{metrics['r2']:.4f}",
+                help="Closer to 1 is better"
+            )
+        
+        with col2:
+            st.metric(
+                label="Root Mean Squared Error",
+                value=f"{np.sqrt(metrics['mse']):.4f}",
+                help="Lower is better"
+            )
+        
+        # Additional regression metrics in an expander
+        with st.expander("View Additional Metrics"):
+            st.write(f"Mean Squared Error: {metrics['mse']:.4f}")
+            st.write(f"Mean Absolute Error: {metrics['mae']:.4f}")
+
+if __name__ == "__main__":
+    main()

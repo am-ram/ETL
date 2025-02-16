@@ -415,3 +415,159 @@ def display_metrics(metrics, problem_type):
 
 if __name__ == "__main__":
     main()
+------------------------------
+
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+from sqlalchemy import create_engine
+import seaborn as sns
+# Main app
+def main():
+    st.title("Data Analysis WebApp")
+    
+    # Sidebar for file upload
+    st.sidebar.header("Upload Data")
+    uploaded_file = st.sidebar.file_uploader("Upload a file", type=["csv", "xlsx"])
+    
+    if uploaded_file:
+        try:
+            # Load data
+            if uploaded_file.name.endswith('.csv'):
+                df = pd.read_csv(uploaded_file)
+            else:
+                df = pd.read_excel(uploaded_file)
+            st.sidebar.success("File uploaded successfully!")
+            
+            # Data Preview
+            st.subheader("Data Preview")
+            st.dataframe(df.head())
+            
+            # Infer Schema
+            st.subheader("Inferred Schema")
+            schema = "CREATE TABLE IF NOT EXISTS my_table (\n  " + ",\n  ".join(
+                [f"{col} VARCHAR(255)" if df[col].dtype == object else f"{col} FLOAT" for col in df.columns]
+            ) + "\n);"
+            st.code(schema, language="sql")
+            
+            # Data Quality
+            st.subheader("Data Quality")
+            missing = df.isnull().sum()
+            percent = round((missing / len(df)) * 100,2)
+            missing_df = pd.DataFrame({"Missing Values": missing, "Percentage (%)": percent})
+            col1, col2 = st.columns(2)
+            with col1:
+                st.dataframe(missing_df)
+            with col2:
+                st.bar_chart(missing_df["Percentage (%)"])
+            
+            # Column Data Type Conversion
+            st.subheader("Column Data Type Conversion")
+            col_to_convert = st.selectbox("Select column to convert", [""] + list(df.columns), index=0)
+            new_dtype = st.selectbox("Select new data type", ["", "String", "Integer", "Float", "Date"], index=0)
+            if col_to_convert and new_dtype:
+                if new_dtype == "String":
+                    df[col_to_convert] = df[col_to_convert].astype(str)
+                elif new_dtype == "Integer":
+                    df[col_to_convert] = pd.to_numeric(df[col_to_convert], errors="coerce").astype("Int64")
+                elif new_dtype == "Float":
+                    df[col_to_convert] = pd.to_numeric(df[col_to_convert], errors="coerce")
+                elif new_dtype == "Date":
+                    df[col_to_convert] = pd.to_datetime(df[col_to_convert], errors="coerce")
+                st.success(f"Column '{col_to_convert}' converted to {new_dtype}.")
+            
+            # Duplicate Row Handling
+            st.subheader("Duplicate Row Handling")
+            if st.checkbox("Show duplicate rows"):
+                st.dataframe(df[df.duplicated()])
+            if st.button("Remove duplicate rows"):
+                df.drop_duplicates(inplace=True)
+                st.success("Duplicate rows removed.")
+            
+            # Column Renaming
+            st.subheader("Rename Columns")
+            col_to_rename = st.selectbox("Select column to rename", [""] + list(df.columns), index=0)
+            new_name = st.text_input("Enter new column name")
+            if col_to_rename and new_name:
+                df.rename(columns={col_to_rename: new_name}, inplace=True)
+                st.success(f"Column '{col_to_rename}' renamed to '{new_name}'.")
+            
+            # Filtering and Subsetting
+            st.subheader("Filter Data")
+            filter_col = st.selectbox("Select column to filter", [""] + list(df.columns), index=0)
+            if filter_col:
+                if pd.api.types.is_numeric_dtype(df[filter_col]):
+                    min_val, max_val = st.slider("Select range", float(df[filter_col].min()), float(df[filter_col].max()), (float(df[filter_col].min()), float(df[filter_col].max())))
+                    df = df[(df[filter_col] >= min_val) & (df[filter_col] <= max_val)]
+                else:
+                    filter_value = st.text_input(f"Enter value to filter in '{filter_col}'")
+                    df = df[df[filter_col].astype(str).str.contains(filter_value, case=False)]
+                st.dataframe(df)
+            
+            # Data Aggregation
+            st.subheader("Data Aggregation")
+            group_col = st.selectbox("Select column to group by", [""] + list(df.columns), index=0)
+            agg_col = st.selectbox("Select column to aggregate", [""] + list(df.columns), index=0)
+            agg_func = st.selectbox("Select aggregation function", ["", "Sum", "Mean", "Count"], index=0)
+            if group_col and agg_col and agg_func:
+                if agg_func == "Sum":
+                    result = df.groupby(group_col)[agg_col].sum()
+                elif agg_func == "Mean":
+                    result = df.groupby(group_col)[agg_col].mean()
+                elif agg_func == "Count":
+                    result = df.groupby(group_col)[agg_col].count()
+                st.dataframe(result)
+            
+            # Data Validation
+            st.subheader("Data Validation")
+            rule_col = st.selectbox("Select column to validate", [""] + list(df.columns), index=0)
+            rule = st.selectbox("Select validation rule", ["", "No Nulls", "Positive Values", "Unique Values"], index=0)
+            if rule_col and rule:
+                if rule == "No Nulls":
+                    invalid = df[df[rule_col].isnull()]
+                elif rule == "Positive Values":
+                    invalid = df[df[rule_col] <= 0]
+                elif rule == "Unique Values":
+                    invalid = df[df.duplicated(subset=[rule_col], keep=False)]
+                st.dataframe(invalid)
+            
+            # Database Integration
+            st.subheader("Load Data to Database")
+            db_type = st.selectbox("Select database type", ["", "PostgreSQL", "MySQL"])
+            if db_type:
+                host = st.text_input("Enter database host")
+                port = st.text_input("Enter database port")
+                database = st.text_input("Enter database name")
+                user = st.text_input("Enter username")
+                password = st.text_input("Enter password", type="password")
+                table_name = st.text_input("Enter table name")
+                if st.button("Load Data"):
+                    try:
+                        if db_type == "PostgreSQL":
+                            engine = create_engine(f"postgresql://{user}:{password}@{host}:{port}/{database}")
+                        elif db_type == "MySQL":
+                            engine = create_engine(f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}")
+                        df.to_sql(table_name, engine, if_exists="replace", index=False)
+                        st.success("Data loaded successfully!")
+                    except Exception as e:
+                        st.error(f"Error loading data: {e}")
+            
+            # Data Export Options
+            st.subheader("Export Data")
+            export_format = st.selectbox("Select export format", ["CSV", "Excel", "JSON"])
+            if export_format == "CSV":
+                csv = df.to_csv(index=False).encode('utf-8')
+                st.download_button("Download CSV", csv, "processed_data.csv", "text/csv")
+            elif export_format == "Excel":
+                excel = df.to_excel(index=False)
+                st.download_button("Download Excel", excel, "processed_data.xlsx", "application/vnd.ms-excel")
+            elif export_format == "JSON":
+                json = df.to_json(orient="records")
+                st.download_button("Download JSON", json, "processed_data.json", "application/json")
+        
+        except Exception as e:
+            st.error(f"An error occurred: {e}")
+       
+if __name__ == "__main__":
+    main()
